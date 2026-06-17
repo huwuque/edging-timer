@@ -17,9 +17,18 @@
                            RUNNING ──(暂停)──> PAUSED ──(继续)──> RUNNING
 """
 
+import ctypes              # 用于启用 Windows 高 DPI 感知，消除字体模糊
 import tkinter as tk       # Python 标准 GUI 库，用于构建桌面窗口
 from tkinter import ttk     # tkinter 的主题组件（本次未使用，预留扩展）
+from PIL import Image, ImageTk  # Pillow：加载 JPG 奖励图片
 # import time               # 未直接使用（通过 tkinter.after() 实现计时）
+
+# ── 启用高 DPI 感知，确保文字高清无模糊 ──
+# 必须在创建任何窗口之前调用，否则无效
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per Monitor DPI v2 (Win 10 1703+)
+except Exception:
+    pass
 
 
 class EdgingTimer:
@@ -36,9 +45,9 @@ class EdgingTimer:
         # ==================== 创建主窗口 ====================
         self.root = tk.Tk()                          # 创建 tkinter 根窗口
         self.root.title("寸止计时器")                  # 设置窗口标题
-        self.root.geometry("420x560")                 # 设置窗口大小：宽420像素 × 高560像素
-        self.root.resizable(False, False)             # 禁止用户拖拽改变窗口大小（保持布局稳定）
-        self.root.configure(bg="#1a1a2e")             # 设置窗口背景色为深蓝黑色（暗色主题）
+        self.root.geometry("460x620")                 # 初始窗口大小
+        self.root.minsize(400, 500)                   # 最小尺寸，防止布局被压坏
+        self.root.configure(bg="#EDEAE5")             # 莫兰迪暖灰白底色（canvas 基调）
 
         # ==================== 核心状态变量 ====================
         # state: 当前状态机的状态
@@ -54,6 +63,7 @@ class EdgingTimer:
         self.edge_records = []   # list[int]: 每次寸止的秒数记录列表
         self._job = None         # str | None: tkinter.after() 返回的定时器 ID，
                                  #            用于取消定时任务，None 表示没有活跃的定时器
+        self._reward_milestones = set()  # set[int]: 已弹出过奖励的寸止秒数里程碑
 
         # 构建所有 UI 组件（标签、按钮、文本框等）
         self._build_ui()
@@ -72,32 +82,42 @@ class EdgingTimer:
           4. 寸止按钮（核心交互，大号醒目）
           5. 控制按钮行（开始 / 暂停 / 重置）
           6. 寸止历史记录文本框
+
+        浅色高级主题：Apple / Linear 风格极简设计
         """
 
-        # 定义配色常量，方便统一修改主题
-        bg = "#1a1a2e"       # 主背景色：深蓝黑
-        fg = "#e0e0e0"       # 通用文字色：浅灰白
-        accent = "#e94560"   # 强调色：粉红（用于标题和寸止按钮文字）
+        # 定义莫兰迪配色常量 — 低饱和度、灰调、温暖柔和
+        bg        = "#EDEAE5"   # 主背景：暖灰白（画布基调）
+        surface   = "#F7F5F1"   # 卡片/文本框背景：暖白
+        fg        = "#4E4A46"   # 主文字：暖深灰褐（永不纯黑）
+        fg_sec    = "#9B9690"   # 次要文字：暖中灰
+        accent    = "#B0A8A0"   # 主强调色：暖灰褐 taupe
+        accent_hv = "#A09890"   # taupe 按下态
+        danger    = "#C4A5A5"   # 寸止中：莫兰迪尘玫瑰（dusty rose）
+        danger_hv = "#B89494"   # 尘玫瑰按下态
+        btn_sec   = "#E0DCD5"   # 次要按钮：暖浅灰
+        btn_sec_hv="#D4CFC7"   # 次要按钮按下态
+        border    = "#D5D0C8"   # 边框：暖灰
 
         # ── 1. 标题 ──
         title = tk.Label(
             self.root,
-            text="⏱ 寸止计时器",
-            font=("Microsoft YaHei UI", 16, "bold"),  # 微软雅黑 16号 加粗
+            text="寸止计时器",
+            font=("Microsoft YaHei UI", 16, "bold"),
             bg=bg,
-            fg=accent                                   # 粉红色文字，突出品牌感
+            fg="#6B6560"                               # 暖灰褐标题
         )
-        title.pack(pady=(20, 10))  # pack() 布局：上边距20px，下边距10px
+        title.pack(pady=(28, 12))
 
         # ── 2. 主计时器（大数字） ──
         self.main_time_label = tk.Label(
             self.root,
-            text="00:00:00",                             # 初始显示为全零
-            font=("Consolas", 48, "bold"),               # 等宽字体，48号，方便阅读时间
+            text="00:00:00",
+            font=("Segoe UI", 54, "bold"),             # Segoe UI 比例字体，极简现代
             bg=bg,
-            fg="#ffffff"                                  # 纯白色，最醒目
+            fg="#4E4A46"                               # 暖深灰褐，不刺眼
         )
-        self.main_time_label.pack(pady=(5, 0))
+        self.main_time_label.pack(pady=(8, 0))
 
         # 主计时器下方的说明小字
         self.main_label = tk.Label(
@@ -105,135 +125,129 @@ class EdgingTimer:
             text="主计时",
             font=("Microsoft YaHei UI", 10),
             bg=bg,
-            fg="#888888"                                  # 灰色，降低视觉优先级
+            fg=fg_sec                                   # 中灰色，降低视觉权重
         )
         self.main_label.pack()
 
         # ── 3. 寸止信息行 ──
-        # 使用 Frame 容器把两个标签放在同一行
         info_frame = tk.Frame(self.root, bg=bg)
-        info_frame.pack(pady=(15, 10))
+        info_frame.pack(pady=(20, 14))
 
-        # 左侧：当前寸止计时（仅在 EDGING 状态下实时更新）
+        # 左侧：当前寸止计时
         self.edge_time_label = tk.Label(
             info_frame,
-            text="寸止计时: --:--",                       # 初始无数据
-            font=("Consolas", 14),
+            text="寸止计时  --:--",
+            font=("Cascadia Mono", 13),                 # Windows 11 现代等宽字体
             bg=bg,
-            fg="#ffaa00"                                  # 橙黄色，提醒用户这是寸止状态指示
+            fg=fg_sec
         )
-        self.edge_time_label.pack(side=tk.LEFT, padx=(0, 20))
+        self.edge_time_label.pack(side=tk.LEFT, padx=(0, 22))
 
         # 右侧：累计寸止次数
         self.edge_count_label = tk.Label(
             info_frame,
-            text="寸止次数: 0",
+            text="次数 0",
             font=("Microsoft YaHei UI", 11),
             bg=bg,
-            fg="#cccccc"
+            fg=fg_sec
         )
         self.edge_count_label.pack(side=tk.LEFT)
 
-        # ── 4. 寸止按钮（核心交互组件） ──
-        # 这是整个应用最重要的按钮。设计要点：
-        #   - 大字、大尺寸，方便在"关键时刻"快速点击
-        #   - 颜色在不同状态间切换：蓝色(待机) ↔ 红色(寸止中)
-        #   - 初始为禁用状态，开始计时后才启用
+        # ── 4. 寸止按钮（核心交互） ──
         self.edge_btn = tk.Button(
             self.root,
-            text="寸  止",                                # 按钮显示文字
-            font=("Microsoft YaHei UI", 22, "bold"),      # 大号加粗
-            bg="#16213e",                                 # 默认背景：深蓝色（待机态）
-            fg="#e94560",                                 # 默认文字：粉红色
-            activebackground="#0f3460",                   # 鼠标按下时的背景色
-            activeforeground="#e94560",                   # 鼠标按下时的文字色
-            relief=tk.FLAT,                               # 扁平风格，无立体边框
-            borderwidth=0,                                # 边框宽度为0
-            padx=40,                                      # 按钮内左右留白
-            pady=18,                                      # 按钮内上下留白
-            cursor="hand2",                               # 鼠标悬停时显示手指光标
-            state=tk.DISABLED,                            # 初始禁用（需要先点"开始"）
-            command=self._on_edge                         # 绑定回调函数
+            text="寸  止",
+            font=("Microsoft YaHei UI", 24, "bold"),
+            bg=accent,                                   # 靛蓝背景
+            fg="#FFFFFF",                                # 白色文字
+            activebackground=accent_hv,                  # 按下时稍深
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=44,
+            pady=20,
+            cursor="hand2",
+            state=tk.DISABLED,
+            command=self._on_edge
         )
-        self.edge_btn.pack(pady=(10, 15))
+        self.edge_btn.pack(pady=(12, 20))
 
         # ── 5. 控制按钮行 ──
         ctrl_frame = tk.Frame(self.root, bg=bg)
-        ctrl_frame.pack(pady=(0, 15))
+        ctrl_frame.pack(pady=(0, 20))
 
-        # [开始] 按钮 — 启动主计时
+        # [开始] — 主要操作，靛蓝实心
         self.start_btn = tk.Button(
             ctrl_frame,
             text="开 始",
             font=("Microsoft YaHei UI", 12, "bold"),
-            bg="#0f3460", fg="#ffffff",
-            activebackground="#16213e", activeforeground="#ffffff",
+            bg=accent, fg="#FFFFFF",
+            activebackground=accent_hv, activeforeground="#FFFFFF",
             relief=tk.FLAT, borderwidth=0,
-            padx=18, pady=8,
+            padx=20, pady=10,
             cursor="hand2",
             command=self._on_start
         )
-        self.start_btn.pack(side=tk.LEFT, padx=5)        # 左排列，左右各留5px间距
+        self.start_btn.pack(side=tk.LEFT, padx=6)
 
-        # [暂停] 按钮 — 暂停/继续主计时
+        # [暂停] — 次要操作，浅灰背景
         self.pause_btn = tk.Button(
             ctrl_frame,
             text="暂 停",
             font=("Microsoft YaHei UI", 12, "bold"),
-            bg="#0f3460", fg="#ffffff",
-            activebackground="#16213e", activeforeground="#ffffff",
+            bg=btn_sec, fg=fg,
+            activebackground=btn_sec_hv, activeforeground=fg,
             relief=tk.FLAT, borderwidth=0,
-            padx=18, pady=8,
+            padx=20, pady=10,
             cursor="hand2",
-            state=tk.DISABLED,                             # 初始禁用
+            state=tk.DISABLED,
             command=self._on_pause
         )
-        self.pause_btn.pack(side=tk.LEFT, padx=5)
+        self.pause_btn.pack(side=tk.LEFT, padx=6)
 
-        # [重置] 按钮 — 清空所有数据
+        # [重置] — 次要操作，浅灰背景
         self.reset_btn = tk.Button(
             ctrl_frame,
             text="重 置",
             font=("Microsoft YaHei UI", 12, "bold"),
-            bg="#0f3460", fg="#ffffff",
-            activebackground="#16213e", activeforeground="#ffffff",
+            bg=btn_sec, fg=fg,
+            activebackground=btn_sec_hv, activeforeground=fg,
             relief=tk.FLAT, borderwidth=0,
-            padx=18, pady=8,
+            padx=20, pady=10,
             cursor="hand2",
             command=self._on_reset
         )
-        self.reset_btn.pack(side=tk.LEFT, padx=5)
+        self.reset_btn.pack(side=tk.LEFT, padx=6)
 
         # ── 6. 寸止记录区域 ──
         record_label = tk.Label(
             self.root,
-            text="— 寸止记录 —",
+            text="寸止记录",
             font=("Microsoft YaHei UI", 10, "bold"),
             bg=bg,
-            fg="#888888"
+            fg=fg_sec
         )
-        record_label.pack(pady=(5, 5))
+        record_label.pack(pady=(6, 8))
 
-        # 记录容器 Frame
-        self.record_frame = tk.Frame(self.root, bg=bg)
-        self.record_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=(0, 20))
+        # 记录容器 Frame — 白色卡片样式
+        self.record_frame = tk.Frame(self.root, bg=surface, highlightbackground=border, highlightthickness=1)
+        self.record_frame.pack(fill=tk.BOTH, expand=True, padx=36, pady=(0, 24))
 
-        # 文本框：显示每次寸止的记录（只读模式）
-        # 使用 tk.Text 而非 Label，因为需要多行显示和滚动
+        # 文本框：白色卡片 + 深色文字
         self.record_text = tk.Text(
             self.record_frame,
-            font=("Consolas", 11),
-            bg="#16213e",                                  # 比主背景稍亮一点的深蓝
-            fg="#cccccc",
-            height=6,                                      # 固定高度6行
+            font=("Cascadia Mono", 11),
+            bg=surface,
+            fg="#4E4A46",
+            height=6,
             borderwidth=0,
             relief=tk.FLAT,
-            state=tk.DISABLED,                             # 初始只读，防止用户编辑
-            padx=10,
-            pady=8,
-            wrap=tk.WORD                                   # 按单词换行
+            state=tk.DISABLED,
+            padx=14,
+            pady=12,
+            wrap=tk.WORD
         )
-        self.record_text.pack(fill=tk.BOTH, expand=True)   # 填满 Frame
+        self.record_text.pack(fill=tk.BOTH, expand=True)
 
     # ═══════════════════════════════════════════════════════════
     #  计时循环
@@ -252,6 +266,13 @@ class EdgingTimer:
         # 只有当状态是"运行"或"寸止"时才计时
         if self.state in ("running", "edging"):
             self.total_seconds += 1                        # 主计时永远在 running/edging 时递增
+
+            # 主计时每 10 秒弹出奖励图片
+            if self.total_seconds > 0 and self.total_seconds % 10 == 0:
+                if self.total_seconds not in self._reward_milestones:
+                    self._reward_milestones.add(self.total_seconds)
+                    self._show_reward()
+
             if self.state == "edging":
                 self.edge_seconds += 1                     # 寸止计时只在 edging 时递增
             self._update_display()                         # 更新所有显示的数字
@@ -272,13 +293,13 @@ class EdgingTimer:
         # 根据当前状态更新寸止计时显示
         if self.state == "edging":
             # 寸止中：显示实时寸止计时
-            self.edge_time_label.config(text=f"寸止计时: {self._fmt(self.edge_seconds)}")
+            self.edge_time_label.config(text=f"寸止计时  {self._fmt(self.edge_seconds)}")
         elif self.state == "running":
             # 正常运行中（非寸止）：显示占位符
-            self.edge_time_label.config(text="寸止计时: --:--")
+            self.edge_time_label.config(text="寸止计时  --:--")
 
         # 更新累计次数
-        self.edge_count_label.config(text=f"寸止次数: {self.edge_count}")
+        self.edge_count_label.config(text=f"次数 {self.edge_count}")
 
     @staticmethod
     def _fmt(sec: int) -> str:
@@ -311,9 +332,10 @@ class EdgingTimer:
         """
         if self.state == "idle":
             self.state = "running"                         # 状态切换
+            self._reward_milestones.clear()               # 新 session 开始，清空奖励里程碑
             self.start_btn.config(text="运 行 中", state=tk.DISABLED)  # 按钮文本变为"运行中"并禁用
             self.pause_btn.config(state=tk.NORMAL)          # 启用暂停按钮
-            self.edge_btn.config(state=tk.NORMAL, bg="#16213e")  # 启用寸止按钮，恢复蓝色
+            self.edge_btn.config(state=tk.NORMAL, bg="#B0A8A0")  # 启用寸止按钮，taupe 背景
             self._tick()                                    # 启动计时循环
 
     def _on_pause(self):
@@ -364,9 +386,9 @@ class EdgingTimer:
             self.edge_seconds = 0                          # 寸止秒数从零开始
             self.edge_btn.config(
                 text="停 止 寸 止",                         # 改变按钮文字
-                bg="#b00020",                              # 背景变深红（警示色）
-                fg="#ffffff",                              # 文字变白（红底白字更醒目）
-                activebackground="#d00028"                 # 按下时稍亮的红色
+                bg="#C4A5A5",                              # 莫兰迪尘玫瑰（dusty rose）
+                fg="#FFFFFF",                              # 白色文字
+                activebackground="#B89494"                 # 按下时稍深
             )
 
         elif self.state == "edging":
@@ -376,16 +398,16 @@ class EdgingTimer:
             self._append_record(self.edge_count, self.edge_seconds)  # 写入文本框
             self.edge_seconds = 0                           # 归零，准备下次使用
             self.state = "running"                          # 回到运行状态
-            # 恢复按钮的蓝色外观
+            # 恢复 taupe 外观
             self.edge_btn.config(
                 text="寸  止",
-                bg="#16213e",
-                fg="#e94560",
-                activebackground="#0f3460"
+                bg="#B0A8A0",
+                fg="#FFFFFF",
+                activebackground="#A09890"
             )
             # 更新界面上寸止相关显示
-            self.edge_time_label.config(text="寸止计时: --:--")
-            self.edge_count_label.config(text=f"寸止次数: {self.edge_count}")
+            self.edge_time_label.config(text="寸止计时  --:--")
+            self.edge_count_label.config(text=f"次数 {self.edge_count}")
 
     def _on_reset(self):
         """
@@ -407,18 +429,19 @@ class EdgingTimer:
         self.edge_seconds = 0
         self.edge_count = 0
         self.edge_records.clear()                          # 清空列表
+        self._reward_milestones.clear()               # 清空奖励里程碑
 
         # 重置 UI 显示
         self.main_time_label.config(text="00:00:00")
-        self.edge_time_label.config(text="寸止计时: --:--")
-        self.edge_count_label.config(text="寸止次数: 0")
+        self.edge_time_label.config(text="寸止计时  --:--")
+        self.edge_count_label.config(text="次数 0")
 
         # 恢复按钮状态
         self.start_btn.config(text="开 始", state=tk.NORMAL)         # "开始"可用
         self.pause_btn.config(text="暂 停", state=tk.DISABLED)        # "暂停"禁用
         self.edge_btn.config(
             state=tk.DISABLED, text="寸  止",
-            bg="#16213e", fg="#e94560"
+            bg="#B0A8A0", fg="#FFFFFF"
         )                                                              # "寸止"禁用
 
         self._clear_records()                              # 清空记录文本框
@@ -449,7 +472,7 @@ class EdgingTimer:
         切换为 NORMAL → 写入 → 再切回 DISABLED。
         """
         self.record_text.config(state=tk.NORMAL)           # 临时允许编辑
-        line = f"#{num}  寸止 {self._fmt(sec)}\n"          # 格式化：如 "#1  寸止 00:00:32"
+        line = f"#{num}    {self._fmt(sec)}\n"               # 极简格式：如 "#1    00:00:32"
         self.record_text.insert(tk.END, line)              # 在末尾追加
         self.record_text.see(tk.END)                       # 自动滚动到最新记录
         self.record_text.config(state=tk.DISABLED)         # 恢复只读
@@ -463,6 +486,43 @@ class EdgingTimer:
         self.record_text.config(state=tk.NORMAL)
         self.record_text.delete("1.0", tk.END)
         self.record_text.config(state=tk.DISABLED)
+
+    def _show_reward(self):
+        """
+        弹出奖励图片弹窗 — 主计时每过 10 秒触发一次。
+
+        弹窗特性：
+          - 无边框居中显示
+          - 图片缩放到 400×400 以内
+          - 2 秒后自动关闭
+          - 加载失败时静默跳过
+        """
+        try:
+            img = Image.open("奖励图片.jpg")
+            img.thumbnail((400, 400), Image.LANCZOS)           # 等比缩放
+            photo = ImageTk.PhotoImage(img)
+
+            reward = tk.Toplevel(self.root)
+            reward.overrideredirect(True)                      # 无边框窗口
+            reward.configure(bg="#EDEAE5")                      # 莫兰迪底色
+
+            label = tk.Label(reward, image=photo, bg="#EDEAE5")
+            label.image = photo                                 # ★ 保持引用，防止被 GC 回收
+            label.pack()
+
+            # 居中屏幕
+            reward.update_idletasks()
+            sw = reward.winfo_screenwidth()
+            sh = reward.winfo_screenheight()
+            w = reward.winfo_reqwidth()
+            h = reward.winfo_reqheight()
+            x = (sw - w) // 2
+            y = (sh - h) // 2
+            reward.geometry(f"+{x}+{y}")
+
+            reward.after(2000, reward.destroy)                 # 2 秒后自动销毁
+        except Exception:
+            pass  # 图片缺失或损坏时静默跳过，不影响主程序
 
     # ═══════════════════════════════════════════════════════════
     #  启动入口
